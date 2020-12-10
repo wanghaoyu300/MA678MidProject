@@ -1,0 +1,212 @@
+---
+title: "Midterm Project Report"
+author: "Haoyu Wang"
+date: "12/9/2020"
+output: pdf_document
+---
+---
+title: "Untitled"
+author: "Haoyu Wang"
+date: "12/9/2020"
+output: 
+  pdf_document: default 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, out.width = "0.9\\linewidth", dev = "png", fig.align  = 'center', warning = FALSE, message = FALSE)
+library(tidyverse)
+library(magrittr)
+library(mice)
+library(VIM)
+library(randomForest)
+library(arm)
+library(corrplot)
+library(pROC)
+library(caret)
+library(rstan)
+library(rstanarm)
+library(lme4)
+```
+
+# Abstract
+Banks play a crucial role in market economies. They decide who can get finance and on what terms and can make or break investment decisions. For markets and society to function, individuals and companies need access to credit. Credit scoring algorithms, which make a guess at the probability of default, are the method banks use to determine whether a loan should be granted or not. </p>
+The credit score, which is a numerical value know as FICO score, ranges from 300 – 850. In general, the higher the score, the lower the risk. The lower score doesn’t necessarily mean you can’t get a loan, but you would probably pay a higher interest rate. What factors can affect the credit score is the main topic of my project.
+  
+# Introduction
+The data were collected from Kaggle: *https://www.kaggle.com/c/GiveMeSomeCredit/data.*
+In this website, Training, Test, Sample Entry and Submission Files are provided. I selected training as my dataset.
+
+# EDA and data clean
+For the convenience, I replace those names of variables into $y, x_{1}, x_{2}, ..., x_{10}$ respectively.
+```{r}
+## Load data
+cs_training <- read_csv("cs-training.csv")
+## Delete 1st column
+cs_training<- cs_training[, -1] 
+## Rename variables
+names(cs_training)<-c("y", "x1", "x2", "x3", "x4",
+                      "x5", "x6", "x7", "x8", "x9", "x10")
+```
+
+After visualizing the missing values, we can see that the variables $x_{5}$ and $x_{10}$ have missing values, i.e., there are missing values in the *MonthlyIncome* column and *NumberofDependents* column. The specific situation can be seen in the above table. There are 29,731 missing values in the *MonthlyIncome* column. , *NumberofDependents* has 3,924. For *MonthlyIncome*, since the missing values are kind of large, so I used *na.roughfix()* fuction to fill them up; and for the missing values in *NumberofDependents*, I just deleted them. (Plot is in Appendix)
+
+Then, find the outliers of variables in *NumberOfTime30-59DaysPastDueNotWorse*, *NumberOfTimes90DaysLate* and *NumberOfTime60-89DaysPastDueNotWorse*. It can be known that there are two outliers of 96 and 98, so they should be eliminated. Also, found that there was an 0 in *age* which doesn't make any sense, so eliminated it as well.
+```{r}
+
+cs_training$x5 %<>% na.roughfix()
+cs_training %<>% filter(!is.na(.$x10))
+## clean outliers
+cs_training %<>% .[-which(.$x3 == 96), ]
+cs_training %<>% .[-which(.$x3 == 98), ]
+cs_training %<>% .[-which(.$x2 == 0), ]
+```
+Then check the distribution of variables, here I took *age* and *MonthlyIncome* as examples(Plots are in Appendix). By the plots, those two variables are roughly normally distributed, which meet the needs of statistical analysis.
+
+Before modeling, we must first check the correlation between variables. If the correlation between variables is significant, it will affect the prediction effect of the model. As can be seen from the figure below, the correlation between the variables is very small. In fact, Logistic regression also need to consider the issue of multicollinearity, however, the correlation of variables is very small, which can be inferred that there is no multicollinearity issue. After modeling, we can also use VIF (variance inflation factor) to test the multicollinearity problem. If there is a multicollinearity problem , then eliminate the variables.
+```{r}
+corrplot::corrplot(cor(cs_training[,1:11]), method = "number")
+```
+For the variable *SeriousDlqin2yrs*, there is an obvious imbalance issue. The observations that *SeriousDlqin2yrs* is equal to 1 are 9879, which is only 6.6% of all observations. Therefore, it is necessary to process the unbalanced data. Meanwhile, the total of observations are large to some extent, it might take forever when running the Logistic GLMM model, which means splitting is necessary.
+```{r}
+table(cs_training$y)
+set.seed(300)
+splitdata1 <- createDataPartition(cs_training$y, time = 1, p = 0.5, list = F)
+set1 <- cs_training[splitdata1, ]
+```
+
+# Modeling
+## Logistic Model
+```{r}
+fit_1 <- glm(y ~ x2 + x5 + x10, data = set1, family = "binomial")
+## ROC check
+pre <- predict(fit_1, set1)
+builtroc <- roc(set1$y, pre)
+plot(builtroc, print.auc = TRUE, auc.polygon=TRUE, grid = c(0.1, 0.2), max.auc.polygon = TRUE,
+     auc.polygon.col = "pink", print.thres = TRUE)
+## Residual plot
+binnedplot(pre, resid(fit_1, type = "response"), col.pts = 5, col.int = "pink")
+```
+The area under the ROC curve is called the AUC statistic. The larger the statistic, the better the model effect. Generally speaking, AUC greater than 0.75 indicates that the model is very reliable. This model has AUC = 0.640, which is relatively reliable. From binned residual plot, we can find that most of residual plots are in the interval, which means this model is good but not the pefect model.
+
+## Logistic GLMM model
+Before using this model, the most important thing is that to make variables that I want to explore as factor. After binning the data, I made a new dataset for easier modeling.
+```{r}
+## Data binning
+boundary_x2 <- c(0, 30, 40, 50, 60, 70, Inf)
+new_x2 <- cut(set1$x2, boundary_x2)
+# plot(new_x2)
+
+boundary_x3 <- c(-Inf, 0, 1, 3, 5, Inf)
+new_x3 <- cut(set1$x3, boundary_x3)
+# plot(new_x3)
+
+boundary_x5 <- c(-Inf, 1000, 3000, 5000, 7000, 9000, 11000, Inf)
+new_x5 <- cut(set1$x5, boundary_x5)
+# plot(new_x5)
+
+boundary_x7 <- c(-Inf, 0, 1, 3, 5, Inf)
+new_x7 <- cut(set1$x7, boundary_x7)
+# plot(new_x7)
+
+boundary_x9 <- c(-Inf, 0, 1, 3, 5, Inf)
+new_x9 <- cut(set1$x9, boundary_x9)
+# plot(new_x9)
+
+boundary_x10 <- c(-Inf, 0, 1, 3, 5, Inf)
+new_x10 <- cut(set1$x10, boundary_x10)
+# plot(new_x10)
+## make a new dataset
+new_set2 <- data.frame(set1$y, new_x2, new_x5, new_x10, new_x3, new_x9, new_x7)
+new_set2 %<>% rename(Result = set1.y,
+                     Age = new_x2,
+                     Income = new_x5,
+                     `Family Members` = new_x10,
+                     `30-59 Days` = new_x3,
+                     `60-89 Days` = new_x9,
+                     `90 Days` = new_x7,
+                     )
+```
+Then, back to Logistic GLMM model:
+```{r}
+## glmer model
+new_fit <- glmer(data = new_set2, Result ~ (1|Age) + (1|Income) + (1|`Family Members`),
+                 family = 'binomial')
+
+pre_new <- predict(new_fit, new_set2)
+builtroc_new <- roc(new_set2$Result, pre_new)
+plot(builtroc_new, print.auc = TRUE, auc.polygon=TRUE, grid = c(0.1, 0.2), max.auc.polygon = TRUE,
+     auc.polygon.col = "pink", print.thres = TRUE)
+
+binnedplot(pre_new, resid(new_fit, type = "response"), col.pts = 5, col.int = "pink")
+```
+This model has AUC = 0.652, which is more reliable. Moreover, from residual plot, we can see that almost plots are in the interval. Thus, Logistic GLMM model is more fit.
+
+## Interpretation
+I fitted a constant (intercept-only) logistic mixed model (estimated using ML and Nelder-Mead optimizer) to predict Result (formula: Result ~ 1). The model included Age, Income and Family Members as random effects (formula: list(~1 | Age, ~1 | Income, ~1 | Family Members)). . The model's intercept is at -2.75 (95% CI [-3.28, -2.22], p < .001). Within this model, standardized parameters were obtained by fitting the model on a standardized version of the dataset. 95% Confidence Intervals (CIs) and p-values were computed using the Wald approximation.
+
+# Discussion
+In this model, I only chose *age*, *MonthlyIncome*, *NumberOfDependents*, so the result might not be accurate. Further, I guess each variable in this dataset can be calculated as a specific number which is credit score. However, I have no idea about how to build a model to calculate the credit score. For increament, I can learn how to build a model to calcualte the score by using all the variables, after that, probably I can also use logistic or logistic GLMM model to chek if my creid score calculation model is correct or not.
+
+# Appendix
+
+The explanations of variables in this dataset:
+
+*SeriousDlqin2yrs*: Person experienced 90 days past due delinquency or worse.
+
+*RevolvingUtilizationOfUnsecuredLines*: Total balance on credit cards and personal lines of credit except real estate and no installment debt like car loans divided by the sum of credit limits.
+
+*age*: Age of borrower in years.
+
+*NumberOfTime30-59DaysPastDueNotWorse*: Number of times borrower has been 30-59 days past due but no worse in the last 2 years.
+
+*DebtRatio*: Monthly debt payments, alimony,living costs divided by monthy gross income.
+
+*MonthlyIncome*: Monthly income.
+
+*NumberOfOpenCreditLinesAndLoans*: Number of Open loans (installment like car loan or mortgage) and Lines of credit (e.g. credit cards).
+
+*NumberOfTimes90DaysLate*: Number of times borrower has been 90 days or more past due.
+
+*NumberRealEstateLoansOrLines*: Number of mortgage and real estate loans including home equity lines of credit.
+
+*NumberOfTime60-89DaysPastDueNotWorse*: Number of times borrower has been 60-89 days past due but no worse in the last 2 years.
+
+*NumberOfDependents*:Number of dependents in family excluding themselves (spouse, children etc.).
+
+Missing values in dataset:
+```{r}
+## Missing Value Checking
+md.pattern(cs_training)
+```
+Unique values in original dataset:
+```{r}
+unique(cs_training$x3)
+unique(cs_training$x7)
+unique(cs_training$x9)
+unique(cs_training$x2)
+```
+single value checking
+```{r}
+## Age
+ggplot(cs_training, aes(x = x2, y = ..density..)) + 
+        geom_histogram(fill = "pink", color = "lightblue", alpha = 0.5) + 
+        geom_density(color = "salmon") +
+        labs(x = "age")
+## Income
+ggplot(cs_training, aes(x = x5, y = ..density..)) + 
+        geom_histogram(fill = "pink", color = "lightblue", alpha = 0.5) + 
+        geom_density(color = "salmon") +
+        xlim(1, 20000)
+```
+
+Plots for the variables after binning
+```{r}
+plot(new_x2)
+plot(new_x3)
+plot(new_x5)
+plot(new_x7)
+plot(new_x9)
+plot(new_x10)
+```
+
+
